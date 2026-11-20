@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  linux:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev
+      - run: npm ci
+      - run: npx tauri build --bundles deb,appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lifelogr-linux
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
+
+  android:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;27.0.12077973"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - run: npm ci
+      - name: Generate Android project
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+        run: |
+          npx tauri android init --ci
+          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          for perm in RECORD_AUDIO CAMERA; do
+            grep -q "permission.$perm" "$MANIFEST" || \
+              sed -i "s#<application#<uses-permission android:name=\"android.permission.$perm\" />\n    <application#" "$MANIFEST"
+          done
+      - name: Build debug APK
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+        run: npx tauri android build --debug --apk --target aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lifelogr-android-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
